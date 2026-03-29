@@ -91,6 +91,13 @@ class TestStreamingStatsAccumulator:
         with pytest.raises(ValueError, match="No data"):
             acc.finalize()
 
+    def test_dimension_mismatch_raises(self):
+        """Feeding batches with different dimensions should raise."""
+        acc = StreamingStatsAccumulator()
+        acc.update(np.array([[1.0, 2.0]]))
+        with pytest.raises(ValueError, match="Dimension mismatch"):
+            acc.update(np.array([[1.0, 2.0, 3.0]]))
+
     def test_heavy_tailed_distribution_quantiles(self):
         """Quantiles should be accurate even for non-Gaussian data."""
         rng = np.random.default_rng(99)
