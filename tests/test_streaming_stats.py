@@ -115,3 +115,81 @@ class TestStreamingStatsAccumulator:
         np.testing.assert_allclose(
             result["q99"], np.percentile(data, 99, axis=0), rtol=0.05
         )
+
+
+import tempfile
+from pathlib import Path
+
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+
+def _create_test_parquet_files(tmp_dir: Path, n_files: int = 3, rows_per_file: int = 500):
+    """Create synthetic parquet files mimicking LeRobot dataset structure."""
+    rng = np.random.default_rng(42)
+    data_dir = tmp_dir / "data" / "chunk_000"
+    data_dir.mkdir(parents=True)
+
+    all_data = {"action.joints": [], "state.eef_position": [], "episode_index": []}
+    for i in range(n_files):
+        n = rows_per_file
+        actions = rng.standard_normal((n, 7)).astype(np.float32)
+        states = rng.standard_normal((n, 3)).astype(np.float32)
+        episodes = np.full(n, i, dtype=np.int64)
+
+        df = pd.DataFrame(
+            {
+                "action.joints": [row.tolist() for row in actions],
+                "state.eef_position": [row.tolist() for row in states],
+                "episode_index": episodes,
+            }
+        )
+        pq.write_table(pa.Table.from_pandas(df), str(data_dir / f"episode_{i:06d}.parquet"))
+
+        all_data["action.joints"].extend(row.tolist() for row in actions)
+        all_data["state.eef_position"].extend(row.tolist() for row in states)
+
+    return data_dir, all_data
+
+
+class TestCalculateDatasetStatistics:
+    """Integration test: streaming stats match numpy reference."""
+
+    def test_matches_numpy_reference(self, tmp_path):
+        data_dir, all_data = _create_test_parquet_files(tmp_path)
+        parquet_paths = sorted(data_dir.glob("*.parquet"))
+
+        from starVLA.dataloader.gr00t_lerobot.datasets import calculate_dataset_statistics
+
+        result = calculate_dataset_statistics(parquet_paths)
+
+        for col_name in ("action.joints", "state.eef_position"):
+            ref = np.array(all_data[col_name], dtype=np.float32)
+            stats = result[col_name]
+
+            np.testing.assert_allclose(stats["mean"], np.mean(ref, axis=0), rtol=1e-4)
+            np.testing.assert_allclose(stats["std"], np.std(ref, axis=0), rtol=1e-4)
+            np.testing.assert_allclose(stats["min"], np.min(ref, axis=0), atol=1e-6)
+            np.testing.assert_allclose(stats["max"], np.max(ref, axis=0), atol=1e-6)
+            np.testing.assert_allclose(
+                stats["q01"], np.percentile(ref, 1, axis=0), rtol=0.05
+            )
+            np.testing.assert_allclose(
+                stats["q99"], np.percentile(ref, 99, axis=0), rtol=0.05
+            )
+
+        # episode_index should be excluded (metadata column)
+        assert "episode_index" not in result
+
+    def test_empty_parquet_files_skipped(self, tmp_path):
+        data_dir = tmp_path / "data" / "chunk_000"
+        data_dir.mkdir(parents=True)
+        # Create an empty parquet file
+        df = pd.DataFrame({"action.x": pd.Series(dtype="object")})
+        pq.write_table(pa.Table.from_pandas(df), str(data_dir / "empty.parquet"))
+
+        from starVLA.dataloader.gr00t_lerobot.datasets import calculate_dataset_statistics
+
+        result = calculate_dataset_statistics(sorted(data_dir.glob("*.parquet")))
+        assert result == {}
